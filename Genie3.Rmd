@@ -1,0 +1,188 @@
+---
+title: "Analyse d'expression différentielle mutli-facteurs : Fer, Azote et CO2"
+subtitle: "Clustering et réseau pour les gènes répondant à chaque facteur"
+author: "Océane Cassan"
+date: "19/03/2020"
+output: 
+  rmdformats::material:
+    fig_width: 12
+    highlight: kate
+
+---
+
+On cherche à étudier comparer des méthode d'inférence de réseaux (co-expression et régulation). 
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr, warn.conflicts = F, quietly = T)
+library(rmdformats, warn.conflicts = F, quietly = T)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.align = "center")
+opts_knit$set(width=75)
+library(stringr)
+library(GENIE3)
+library(igraph)
+library(visNetwork)
+library(bc3net)
+
+setwd("D:/These/NetworkInference")
+
+load("./Data/DEGsListsFiltered.RData")
+load("Data/PlnTFBDRegulatorsList.RData")
+load("./Data/normalized.count_At.RData")
+load("Data/OntologyAllGenes.RData")
+
+
+source("Funtions/Network_functions.R")
+
+genes <- DEGs[["cnF CnF"]]
+rownames(ontologies) <- ontologies$ensembl_gene_id
+
+removeNitrateStarv = F; removeIronStarv = F
+ 
+ 
+if (removeIronStarv) normalized.count <- normalized.count[,grepl("F", colnames(normalized.count))]
+if (removeNitrateStarv) normalized.count <- normalized.count[,grepl("N", colnames(normalized.count))]
+  
+```
+
+
+# Personalized functions
+
+
+```{r}
+genie <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, top = 0.05, fixedLinkNumber = NA,
+                  returnLinks = F){
+
+
+  print(head(normalized.count))
+  print(intersect(rownames(normalized.count),regressors))
+  print(targets)
+  mat <- GENIE3(normalized.count, regulators = intersect(rownames(normalized.count),regressors), targets = targets, treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores,verbose = T)
+  #hist(mat)
+  links <- getLinkList(mat)
+  
+  if(returnLinks){return(links)}
+  
+  if(is.na(fixedLinkNumber)) links <- links[1:round(dim(links)[1]*top,0),]
+  else links <- links[1:fixedLinkNumber,]
+  
+  print(paste0("Number of links : ", dim(links)[1]))
+  
+  g <- graph.data.frame(links, directed = F)
+  return(g)
+  
+}
+
+
+plotStats <- function(net){
+  ont <- ontologies[match(V(net)$name, ontologies$ensembl_gene_id),]
+  data <- toVisNetworkData(net)
+  
+  #attributs des noeuds et des liens
+  data$nodes$Ontology <- ont[match(data$nodes$id, ont$ensembl_gene_id),]$external_gene_name
+  data$nodes$description <-ont[match(data$nodes$id, ont$ensembl_gene_id),]$description
+  data$nodes$group <- ifelse(data$nodes$id %in% TF$AGI, "Regulator", "Target Gene")
+  
+  importance <- (degree(net)/max(degree(net))+betweenness(net)/max(betweenness(net)))*0.5
+  
+  data$nodes$ranking <- importance[match(data$nodes$id, names(importance))]
+  data$edges$value <- data$edges$weight
+  netStats(net)
+  #plot
+  net <- visNetwork(nodes = data$nodes, edges = data$edges)%>% 
+          visEdges(smooth = FALSE, color = '#333366') %>% 
+          #visEdges(smooth = FALSE, arrows = 'to', color = '#333366') %>% 
+          visPhysics(solver = "forceAtlas2Based", timestep = 0.9, minVelocity=10, 
+                     maxVelocity = 10, stabilization = F)%>%
+          visOptions(selectedBy = "group", highlightNearest = TRUE,nodesIdSelection  = TRUE, collapse = TRUE)%>% 
+          visEvents(click = "function(nodes){
+                  Shiny.onInputChange('click', nodes.nodes);
+                  ;}") %>% 
+          visGroups(groupname = "Regulator", size = 28,
+                    color = list("background" = "#003399", "border"="#FFFFCC"), shape = "square") %>% 
+          visGroups(groupname = "Target Gene", color = "#77EEAA") %>% 
+          visNodes(borderWidth=0.5) 
+
+  print(kable(head(data$nodes[order(-data$nodes$ranking),], n=20)))
+  
+  return(net)
+}
+```
+
+
+# Know regulators as regressors
+
+```{r}
+
+plotStats(genie(normalized.count, regressors = intersect(genes, TF$AGI), targets = genes, fixedLinkNumber = 600))
+
+```
+
+
+# All genes as regressors
+
+```{r}
+
+plotStats(genie(normalized.count, regressors = genes, targets = genes, fixedLinkNumber = 600))
+
+```
+
+
+# Thresold on links number effect
+
+
+```{r}
+
+links <- genie(normalized.count, targets = genes, regressors = intersect(genes, TF$AGI), returnLinks = T)
+for(nbLinks in c(10, 100, 500, 1000, 2000)){
+  newLinks <- links[1:nbLinks,]
+  g <- graph.data.frame(newLinks, directed = F)
+  V(g)$color <- ifelse(V(g)$name %in% TF$AGI, 1, 0)
+  plot.igraph(g, vertex.size=4, vertex.label.cex=0.1, color = V(g)$color, main = paste0(nbLinks, " links"))
+}
+```
+
+
+# GENIE3 VS BC3NET
+
+The basic idea of BC3NET is to generate from one dataset D_s, consisting of s samples, an ensem-ble of B independent bootstrap datasets D_k by sampling from $D(s)$ with replacement by using anon-parametric bootstrap (Efron 1993).  Then, for each generated data set $D_k$ in the ensemble, anetwork $G^b_k$ is inferred by using C3NET (Altay 2010a). From the ensemble of networks $G^b_k$ we construct one weighted network $G^b_w$ which is used to determine the statistical significanceof the connection between gene pairs. This results in the final binary, undirected network G.
+
+A base component of BC3NET is the inference method C3NET introduced in Altay (2010a), which we present in the following in a modified form to obtain a more efficient implementation.  Briefly,C3NET consists of three main steps.   First,  mutual information values among all gene pairs areestimated. Second, an extremal selection strategy is applied allowing each of the p genes in a givendataset to contribute at most one edge to the inferred network.  That means we need to test only pdifferent hypotheses and not $p(p-1)/2$.  This potential edge corresponds to the hypothesis test thatneeds to be conducted for each of the p genes.  Third, a multiple testing procedure is applied tocontrol the type one error. In the above described context, this results in a network $G^b_k$.
+
+
+Avec GENIE3, il s'agit de méthodes ensemblistes.
+
+```{r}
+
+BC3net <- bc3net(dataset = normalized.count[genes,] )
+gcc <- getgcc(BC3net)
+plotStats(gcc)
+
+genie <- genie(normalized.count, regressors = genes, targets = genes, fixedLinkNumber = length(E(gcc)))
+plotStats(genie)
+
+base::intersect(as.character(E(gcc)), as.character(E(genie)))
+
+a <- E(gcc)
+igraph::intersection(E(gcc)[1:length(E(gcc))], E(genie))
+
+inter <- igraph::intersection(gcc, genie, keep.all.vertices=F)
+plotStats(inter)
+
+```
+
+Ah.... ben c'est pas beaucoup en commun...... :(
+
+# Réseau réponse nitrate
+
+
+genes <- DEGs[["cnF CnF"]]
+
