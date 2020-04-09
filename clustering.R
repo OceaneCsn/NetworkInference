@@ -88,5 +88,17 @@ compareOnt <- function(idsList, universe, simCutoff = 0.8){
 }
 compareOnt(idsList=idsList, universe)
 
+############################################# Visu des clusters de coseq sur nos réseaux
+load("D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N.RData")
 
+load("D:/These/ClusteringAnalysis/Clusterings/AmbientCO2_LowNitrateFe-ElevatedCO2_LowNitrateFeNoIronStarv.RData")
+
+
+data$nodes$coseqCluster <- cluster[[1]][match(data$nodes$id, names(cluster[[1]]))]
+length(match(data$nodes$id, names(cluster[[1]])))
+
+save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N.RData")
+data$edges$color = "black"
+data$nodes$group <- data$nodes$coseqCluster
+plotNetwork(data)
 
