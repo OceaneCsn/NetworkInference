@@ -75,15 +75,17 @@ hy5BL <- unique(hy5BL$Gene.ID)
 hy5RL <- read.csv("Data/Chip-HY5-2018-Circadian-RL.csv", sep = '\t', h=T, stringsAsFactors = F)
 hy5RL <- unique(hy5RL$Gene.ID)
 
-hy5_2018 <- intersect(hy5RL, hy5BL)
-
+#hy5_2018 <- intersect(hy5RL, hy5BL)
+hy5_2018 <- union(hy5RL, hy5BL)
 
 ############# intersection des deux
 
-hy5 <- intersect(hy5Targets, hy5_2018)
+#hy5 <- intersect(hy5Targets, hy5_2018)
+hy5 <- union(hy5Targets, hy5_2018)
+
 
 # combien sont confirmées par les papiers
-data$edges$HY5_Chip_Validated <- ifelse(data$edges$to %in% hy5_2018 & data$edges$from == "AT5G11260", 1, 0)
+data$edges$HY5_Chip_Validated <- ifelse(data$edges$to %in% hy5 & data$edges$from == "AT5G11260", 1, 0)
 sum(data$edges$HY5_Chip_Validated)
 
 

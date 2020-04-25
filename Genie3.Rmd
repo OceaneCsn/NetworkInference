@@ -45,7 +45,7 @@ source("Funtions/Network_functions.R")
 genes <- DEGs[["cnF CnF"]]
 rownames(ontologies) <- ontologies$ensembl_gene_id
 
-removeNitrateStarv = F; removeIronStarv = F
+removeNitrateStarv = F; removeIronStarv = T
  
  
 if (removeIronStarv) normalized.count <- normalized.count[,grepl("F", colnames(normalized.count))]
@@ -62,9 +62,7 @@ genie <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCor
                   returnLinks = F){
 
 
-  print(head(normalized.count))
-  print(intersect(rownames(normalized.count),regressors))
-  print(targets)
+  
   mat <- GENIE3(normalized.count, regulators = intersect(rownames(normalized.count),regressors), targets = targets, treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores,verbose = T)
   #hist(mat)
   links <- getLinkList(mat)
@@ -122,7 +120,7 @@ plotStats <- function(net){
 
 ```{r}
 
-plotStats(genie(normalized.count, regressors = intersect(genes, TF$AGI), targets = genes, fixedLinkNumber = 600))
+plotStats(genie(normalized.count, regressors = intersect(genes, TF$AGI), targets = genes, top=1))
 
 ```
 
@@ -176,6 +174,16 @@ igraph::intersection(E(gcc)[1:length(E(gcc))], E(genie))
 
 inter <- igraph::intersection(gcc, genie, keep.all.vertices=F)
 plotStats(inter)
+
+
+#################### Generation des reseaux : 
+
+net <- genie(normalized.count, regressors = intersect(genes, TF$AGI), targets = genes, top=0.05)
+data <- toVisNetworkData(net)
+hist(data$edges$weight)
+edges <- data$edges[,c("from", "to", "weight")]
+colnames(edges)[1:2] <- c("src", "trg")
+write.table(edges, file = "D:/These/Backboning/NetworkCO2_N_top0.05.txt", row.names = F, sep = '\t')
 
 ```
 

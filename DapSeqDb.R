@@ -165,5 +165,10 @@ query <- dbSendQuery(con, "SELECT * FROM binding WHERE tf_agi = ? AND amplified 
 dbBind(query, list("AT5G11260"))
 
 res <- data.frame(dbFetch(query))
+dapHY5All <- res$gene_agi
+intersect(dapHY5All, hy5)
 
 length(intersect(res$gene_agi, hy5))
+
+
+
