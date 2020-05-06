@@ -102,3 +102,33 @@ hist(hy5edges$weight)
 hy5edges[hy5edges$to %in% common,]
 
 hist(data$edges$weight)
+
+
+
+############## genes nitrate, quels sont les TFs en commun?
+
+
+load("D:/These/NetworkShiny/Data/N_uptake_genes.RData")
+load("D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N.RData")
+load("D:/These/NetworkShiny/Data/OntologyAllGenes.RData")
+
+
+edges <- data$edges[data$edges$to %in% n_uptake_genes,]
+tfs <- edges$from
+
+getTargets <- function(tf){
+  targets <- edges[edges$from==tf,"to"]
+  targets <- ontologies[match(targets, ontologies$ensembl_gene_id),"external_gene_name"]
+  return(paste(targets, collapse = ', '))
+}
+
+
+getTargets("AT4G11880")
+
+
+res <- data.frame(TFs = names(table(edges$from)), targetNumber = as.vector(table(edges$from)))
+
+res$name <- ontologies[match(res$TFs, ontologies$ensembl_gene_id), "external_gene_name"]
+res$targets <- sapply(res$TFs, getTargets)
+
+res <- res[order(-res$targetNumber),]

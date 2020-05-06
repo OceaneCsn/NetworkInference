@@ -21,6 +21,8 @@ res$NitrateScore <- rowSums(res[,grepl("_", colnames(res))])
 res$Gene
 data$nodes$NitrateScore <- res$NitrateScore
 data$nodes
+data$nodes
+
 
 #ajout du cluster louvain
 net <- igraph::graph_from_data_frame(d = data$edges, directed = F)
@@ -30,10 +32,17 @@ membership <- membership(communities)
 data$nodes$louvainCluster <- membership[match(data$nodes$id, names(membership))]
 
 newData <- data
-newData$nodes$group <- newData$nodes$louvainCluster
+newData$nodes$group <- newData$nodes$coseqCluster
 plotNetwork(newData)
 
-save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_IronStarv_LowNitrate_CO2-N-Fe.RData" )
+
+# ajout du cluster coseq 
+load("D:/These/ClusteringAnalysis/Clusterings/AmbientCO2_LowNitrateFe-ElevatedCO2_LowNitrateFeNoIronStarv.RData")
+
+#load("D:/These/NetworkShiny/NetworkData/CO2DEGenes_IronStarv_LowNitrate_CO2-N .RData")
+data$nodes$coseqCluster <- cluster[[1]][match(data$nodes$id, names(cluster[[1]]))]
+
+
 
 # Nombre de cibles pour un TF
 degree(net)
@@ -101,6 +110,10 @@ consensus <- function(gene, data){
 }
 
 data$nodes$consensusCluster <- sapply(data$nodes$id, consensus, data)
+save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N_PvalueRandomVariable0.1.RData" )
+
+colnames(data$nodes)
+data$nodes
 
 data$nodes$group <- data$nodes$consensusCluster
 data$edges$color <- "grey"

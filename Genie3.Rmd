@@ -185,6 +185,26 @@ edges <- data$edges[,c("from", "to", "weight")]
 colnames(edges)[1:2] <- c("src", "trg")
 write.table(edges, file = "D:/These/Backboning/NetworkCO2_N_top0.05.txt", row.names = F, sep = '\t')
 
+
+#### Reseau avec variance de 1 pour chaque gene
+library(matrixStats)
+dim(normalized.count)
+
+normalized.count <- normalized.count[genes,]
+normStd <- normalized.count/rowSds(normalized.count)
+rowVars(normStd)
+
+net <- genie(normalized.count, regressors = intersect(genes, TF$AGI), targets = genes, fixedLinkNumber=3000)
+data <- toVisNetworkData(net)
+data$nodes$Ontology <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "external_gene_name"]
+data$nodes$description <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "description"]
+data$nodes$group <- ifelse(data$nodes$id %in% TF$AGI, "Regulator", "Target Gene")
+
+
+save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N_VarianceNorm.RData")
+hist(data$edges$weight)
+
+
 ```
 
 Ah.... ben c'est pas beaucoup en commun...... :(

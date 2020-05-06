@@ -20,7 +20,6 @@ d$var = as.numeric(sapply(d$genes, getVar))
 d <- d[order(-d$var),]
 
 library("ggplot2")
-library("ggpubr")
 #ggplot(data = d, aes(x= var, y=degree)) + geom_hex(bins = 20) +xlim(c(0,52029485.41))
 ggplot(data = d, aes(x= sqrt(var), y=degree)) + geom_hex() + xlim(c(0,7500)) +ggtitle("Gene in-degree depending on gene standard deviation")
 
@@ -49,3 +48,13 @@ df$var <- as.numeric(sapply(df$genes, getVar))
 
 ggplot(data = df, aes(x = as.factor(in_network), y = var, fill = as.factor(in_network))) + geom_boxplot(alpha = 0.4) + ylim(0,1000) +
   stat_compare_means(method = "t.test")
+
+
+
+################### Variable random pour genie3 et seuil d'importance
+
+
+
+
+
+

@@ -52,9 +52,7 @@ PLN_network <- function(data, DEGenes, plot_path=F){
 
 genie <- function(normalized.count, regressors, targets, nTrees=1000, nCores=5, top = 0.05, fixedLinkNumber = NA,
                   returnLinks = F){
-  print(head(normalized.count))
-  print(intersect(rownames(normalized.count),regressors))
-  print(targets)
+  
   mat <- GENIE3(normalized.count, regulators = intersect(rownames(normalized.count),regressors), targets = targets, treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores,verbose = T)
   return(mat)
 }
@@ -89,7 +87,7 @@ networkData <- function(net, ontologies){
 plotNetwork <- function(data){
   visNetwork(nodes = data$nodes, edges = data$edges)%>% 
     visEdges(smooth = FALSE, color = '#333366') %>% 
-    #visEdges(smooth = FALSE, arrows = 'to', color = '#333366') %>% 
+    visEdges(smooth = FALSE, arrows = 'to', color = '#333366') %>% 
     visPhysics(solver = "forceAtlas2Based", timestep = 0.9, minVelocity=10, 
                maxVelocity = 10, stabilization = F)%>%
     visOptions(selectedBy = "group", highlightNearest = TRUE,nodesIdSelection  = TRUE, collapse = TRUE)%>% 
