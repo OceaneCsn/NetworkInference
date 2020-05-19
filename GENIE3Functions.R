@@ -12,7 +12,7 @@ load("./Data/normalized.count_At.RData")
 load("Data/OntologyAllGenes.RData")
 
 
-source("Funtions/Network_functions.R")
+
 
 genes <- DEGs[["cnF CnF"]]
 removeNitrateStarv = F; removeIronStarv = T
@@ -176,7 +176,7 @@ data <- networkToData(net, ontologies, TF)
 
 save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N_PvalueRandomVariable0.01.RData")
 
-plotNetwork(data)
+
 dim(data$nodes)
 
 

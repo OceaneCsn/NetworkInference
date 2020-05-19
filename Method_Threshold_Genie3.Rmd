@@ -45,6 +45,8 @@ GENIE3 est une méthode d'inférence de Gene Regulatory Networks. Elle prend en 
 
 
 GENIE3 détermine par Random Forests, pour chaque profil d'expression d'un gène cible l'influence/importance de l'expression de chaque TF renseigné.
+" Several variable importance measures have been proposed in the literature for tree-based methods. In our experiment, we consider a measure which at each test node computes the total reduction of the variance of the output variable due to the split," (GENIE3 publication)
+
 Il en résulte une matrice d'adjascence non sparse, contenant une valeur d'importance pour toutes les paires TFs-cibles possibles.
 
 On cherche à déterminer une valeur d'importance seuil, au dessus de laquelle on garderait les interractions TFs-gènes cibles pour construire notre réseau.
@@ -53,7 +55,7 @@ Certaines méthodes ont déja été envisagées ou essayées :
   
 + **Hard thresholding** : pour l'instant, on a fixé un seuil assez arbitraire (seulement basé sur le nombre d'arrêtes qui rend le réseau visualisable et analisable). On a fixé un réseau qui contient les 3000 arrêtes de poids le plus fort.
 
-+ **BRANE CUT** : a l'air très inétressante mais codée en Matlab et requiert des données générées en Matlab. J'aime peu l'idée d'utiliser matlab (elitiste, cher et pas dans les principes open source), et en plus si on veut mettre notre méthode à disposition, ça complique beaucoup les choses d'appeler du code matlab en dehors du R.
++ **BRANE CUT** : a l'air très inétressante mais codée en Matlab et requiert des données générées en Matlab. J'aime peu l'idée d'utiliser matlab (elitiste, pas vraiment dans les principes open source), et en plus si on veut mettre notre méthode à disposition, ça complique beaucoup les choses d'appeler du code matlab en dehors du R.
 
 + **Backboning** : Intéressant mais repose sur des hypothèses que nous ne sommes pas sûrs de vérifier dans notre cas particulier, notament la loi binomiale pour le poids d'une arrête. Module python.
 
@@ -68,7 +70,7 @@ Or, nous n'avons à priori pas d'idée de cette valeur qui nous permettrait de *
 L'idée est inspirée d'une méthode que Sophie avait déjà rencontrée sur des Random Forest. 
 
 + On crée des variables issues de l'**expression moyenne des TFs**, qui ne portent donc pas plus d'information que ce que les autres TFs peuvent apporter. 
-On appelle ces variables les variables random, ou espionnes. En pratqie, on les lire dans une loi de Poisson dont le paramètre est la moyenne de l'expression de tous les TFs. (Il s'agit d'un vecteur d'expressions, de dimension le nombre de conditions d'expression dans jeu de données)
+On appelle ces variables les variables random, ou espionnes. En pratique, on les lire dans une loi de Poisson dont le paramètre est la moyenne de l'expression de tous les TFs. (Il s'agit d'un vecteur d'expressions, de dimension le nombre de conditions d'expression dans jeu de données)
 
 + On insére ces variables au jeu de données, puis on utilise GENIE3 sur ce jeu de données.
 
@@ -220,7 +222,7 @@ plotNetwork(data)
 
 # Distribution des valeurs d'importance
 
-On s'attend à coir une distribution des TFs plus étalée vers de fortes importances que ne le serait celle des variables espionnes.
+On s'attend à voir une distribution des TFs plus étalée vers de fortes importances que ne le serait celle des variables espionnes.
 
 C'est en effet ce que l'on constate :
 
@@ -241,7 +243,22 @@ p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/100
 
 ```
 
+On note que comparé au nombre total possible d'arrêtes (176 000), on en sélectionne très peu.
+
 # Exploration paramétrique
+
+La méthode repose cependant sur de nombreux paramètres, et explorer leur influence est nécessaire pour faire un choix.
+
+Nous lançons donc la méthode plusieurs fois, pour chaque set de paramètres, et regardons le nombre d'arrêtes selectionnées au final (axe y). Les paramètres sont :
+
+
++ Le nombre de variables espionnes (axe x)
+
++ Si oui ou non les profils sont tous normalisés afin d'avoir une variance unitaire. (les deux lignes du graphe)
+
++ Si on tire les variables random dans une loi Poisson dont le paramètre est spécifique à la condition, ou si on prend la moyenne globale parmis toutes les conditions (les deux colonnes du graphe)
+
++ Le quantile choisi, correspond à la pvalue de notre test (couleur des points)
 
 <img src="D:\These\NetworkAnalysisSophie\explorationGENIE3.png" align="center" alt="" width="1500"/>
 
@@ -249,12 +266,83 @@ p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/100
 <img src="D:\These\NetworkAnalysisSophie\explorationGENIE3zoom.png" align="center" alt="" width="1500"/>
 
 
+On se rend compte qu'on n'a pas vraiment d'effet de la normalisation (étudié plus bas).
+
+Ensuite, de prendre une moyenne non dépendant des conditions donne un plus grand nombre d'arrêtes, faisant penser qu'il s'agit d'un choix moins informatif pour nos variables randoms, et donc plus proche de notre hypthèse nulle.
+
+
+Il faut des quantiles assez faibles pour avoir un nombre d'arrêtes raisonnable, on peut dire qu'entre 0.005 et 0.001 on est dans une bonne zone.
+
+Le nombre de vraibles espionnes semble augmenter le nombre d'arrêtes sélectionnées, je ne sais pas encore exactement pourquoi.
+
 # Version seuil gene specific
+
+La méthode proposée précédement repose sur l'hypothèse que les valeurs d'importance de toutes les paires peuvent être directement comparées, et ne dépendent pas de caractèristiques propres aux gènes, comme leur variance ou expression moyenne.
+
+Pour s'en assurer, nous avons implémenté une méthode qui, au lieu de se baser sur un quantile d'une distribution qui merge tous les gènes cibles, se base sur un seuil par gène.
+
+On prend, pour chaque gène, l'importance maximale trouvé parmis les n variables espionnes générées.
+Tous les TFs dont l'importance est supérieure à ce seuil pour ce gène sont gardés.
+
+On refait donc une exploration paramétrique pour avec ou sans moyenne condition spécifique, pour plusieurs nombre de variables espionnes : 
 
 <img src="D:\These\NetworkAnalysisSophie\explorationGENIE3GeneSpecific.png" align="center" alt="" width="1500"/>
 
+On voit tout de sute que les ordres de grandeur du nombre de links gardés dans le réseau sont beaucoup trop grands pour avoir des réseaux interprêtables facilement (100 000 arrêtes, au minimum 20 000)...
+
+
+On constate encore que le nombre de variables espionnes augmente le nombre d'arrêtes gardées.
+
+Pour s'assurer du fait que la valeur d'importance calculée par GENIE3 ne dépend pas du gène, on trace l'importance maximale des variables espionnes pour chaque gène, en fonction de son coefficient de variation :
+
+<img src="D:\These\NetworkAnalysisSophie\maxImpSdMean.png" align="center" alt="" width="1500"/>
+
+La corrélation est faible (10%), justifiant que l'on puisse utiliser une methode de seuil non spécifique au gène telle que celle présentée dans un premier temps.
+
 # Effet de la variance normalisée
 
-A priori, on avait vu que la variance ne change pas trop les réseaux inférés, switch des arrêtes, mais on maimerait le quantifier.
+A priori, on avait vu que la variance ne change pas trop les réseaux inférés, switch des arrêtes, mais on aimerait le quantifier. De plus, dans l'exploration paramétrique précédente, elle ne changeait pas le nombre d'arrêtes.
 
-Correlation de spearman de sophie
+
+On choisit de calculer la correlation de spearman entre un vecteur d'importances des mêmes paires, calculées avec normalisation de la variance ou non.
+
+Avant le test, on fixe qu'une valeur supérieure à 80% serait bien, sinon pas terrible.
+
+```{r varnorm}
+
+resNorm <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, varNorm = T, pval = pval, n_spies = 20, 
+              keepColMeans = F)
+
+tfs_norm <- resNorm$impTFs
+
+d <- data.frame(impNorm = tfs_norm, imp = tfs)
+
+ggplot(data = d, aes(x = log(imp), y = log(impNorm))) + geom_hex()
+
+cor(tfs, tfs_norm, method = "spearman")
+```
+La corrélation est très forte, au dessus des 80%!.
+
+Cela confirme que la normalisation de la variance ne semble pas nécessaire, car GENIE3 semble déjà avoir réglé la dépendance entre gènes et valeurs d'importance avec une étape de normalisation interne. En effet, les importances pour chaque gènes sont divisées par la somme de toutes les importances de ce gène cible là.
+
+# CONCLUSION
+
+
+Au terme des simulations et des tests, il semblerait que nous puissions nous orienter vers cette méthode, en définissant un quantile assez petit, et en prenant  une moyenne globale comme paramètre des lois de Poisson de nos variables espionnes.
+
+
+Le choix du nombre de variables espionnes est encore un peu flou, et relativement peu influent. Nous pouvons supposer qu'il est mieux de privilégier un petit nombre de variables espionnes afin de ne pas interférer avec les combinatoires de TFs inférées par GENIE3, et ne pas risquer de diminuner le ratio signal sur bruit. 
+
+Un point négatif est qu'il reste encore pas mal de variabilité dans les réseaux finaux (en terme de nombre de connexions), car ils dépendent pas mal du tirage initial des variables randoms.
+
+
+Il s'agit ici d'un **test empirique** que nous avons créé pour répondre à notre problème.
+Au lieu de connaître théoriquement le distribution de l'importance du bruit de fond, ou background, des données, nous l'avons générée en introduisant des variables qui nous avons simulées sous cette hypothèse nulle.
+
+
+Les résultats restent sujets à des choix pas toujours triviaux en termes de valeurs de paramètres, mais la sortie de notre méthode est plus interprêtable et utilisable que du hard thresholding.
+En effet, plutôt que de fixer un seuil sur une valeur d'importance issue d'un random forest à priori peu informative, nous pouvons travailler avec des pvalues, traduisant plus correctement notre volonté de stringeance.
+
+
+Cela semble être une bonne base pour commencer à analyser et interprêter le réseau en des termes plus biologiques! 
