@@ -61,8 +61,6 @@ if (removeNitrateStarv) normalized.count <- normalized.count[,grepl("N", colname
 genie <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, top = 0.05, fixedLinkNumber = NA,
                   returnLinks = F){
 
-
-  
   mat <- GENIE3(normalized.count, regulators = intersect(rownames(normalized.count),regressors), targets = targets, treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores,verbose = T)
   #hist(mat)
   links <- getLinkList(mat)
@@ -203,6 +201,20 @@ data$nodes$group <- ifelse(data$nodes$id %in% TF$AGI, "Regulator", "Target Gene"
 
 save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N_VarianceNorm.RData")
 hist(data$edges$weight)
+
+################### generation pour tests avec une paire de TFs très corrélés
+
+regressors = intersect(genes, TF$AGI)
+# sans WRKY
+regressors = regressors[regressors != "AT3G15500"]
+
+net <- genie(normalized.count, regressors = regressors, targets = genes, fixedLinkNumber=3000)
+
+
+data_sansWRKY <- toVisNetworkData(net)
+data$nodes$Ontology <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "external_gene_name"]
+data$nodes$description <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "description"]
+data$nodes$group <- ifelse(data$nodes$id %in% TF$AGI, "Regulator", "Target Gene")
 
 
 ```

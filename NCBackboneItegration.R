@@ -74,35 +74,6 @@ data <- newData
 save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N_TFs_Only.RData")
 
 
-############################ corrélation des TFs entre eux
-
-load("Data/normalized.count_At.RData")
-
-edges <- paste(data$edges$from, data$edges$to)
-reversedEdges <- paste(data$edges$to, data$edges$from)
-
-intersect(edges, reversedEdges)
-
-cors <- c()
-names <- c()
-corEdgesDouble <- c()
-tfs <- data$nodes[data$nodes$group == "Regulator","id"]
-for (tf1 in tfs) {
-  for (tf2 in tfs) {
-    if (tf1 != tf2) {
-      cors <- c(cors, cor(normalized.count[tf1, ], normalized.count[tf2, ], method = "spearman"))
-      names <- c(names, paste(tf1, tf2))
-      if(paste(tf1, tf2) %in% recip){
-        corEdgesDouble <- c(corEdgesDouble, cor(normalized.count[tf1, ], normalized.count[tf2, ], method = "spearman"))
-      }
-    }
-  }
-}
-
-
-
-hist(cors, breaks = 30)
-hist(corEdgesDouble, breaks = 30)
 
 
   

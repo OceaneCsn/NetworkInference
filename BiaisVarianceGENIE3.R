@@ -51,10 +51,6 @@ ggplot(data = df, aes(x = as.factor(in_network), y = var, fill = as.factor(in_ne
 
 
 
-################### Variable random pour genie3 et seuil d'importance
-
-
-
 
 
 

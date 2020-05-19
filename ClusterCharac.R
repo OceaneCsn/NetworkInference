@@ -119,3 +119,96 @@ data$nodes$group <- data$nodes$consensusCluster
 data$edges$color <- "grey"
 plotNetwork(data)%>%  visGroups(groupname = "-1", color = "lightgrey")
 save(data, file = "D:/These/NetworkShiny/NetworkData/CO2DEGenes_IronStarv_CO2-Fe.RData" )
+
+
+
+############################ corrélation des TFs entre eux
+load("D:/These/NetworkShiny/NetworkData/CO2DEGenes_faibleNitrate_CO2-N.RData")
+
+load("D:/These/NetworkShiny/Data/normalized.count_At.RData")
+
+edges <- paste(data$edges$from, data$edges$to)
+reversedEdges <- paste(data$edges$to, data$edges$from)
+
+intersect(edges, reversedEdges)
+
+cors <- c()
+names <- c()
+#corEdgesDouble <- c()
+tfs <- data$nodes[data$nodes$group == "Regulator","id"]
+for (tf1 in tfs) {
+  for (tf2 in tfs) {
+    if (tf1 != tf2) {
+      cors <- c(cors, cor(normalized.count[tf1, ], normalized.count[tf2, ], method = "spearman"))
+      names <- c(names, paste(tf1, tf2))
+      # if(paste(tf1, tf2) %in% recip){
+      #   corEdgesDouble <- c(corEdgesDouble, cor(normalized.count[tf1, ], normalized.count[tf2, ], method = "spearman"))
+      # }
+    }
+  }
+}
+
+d <- data.frame(names, abs(cors))
+d <- d[seq(1,dim(d)[1],2),]
+
+#d <- d[!duplicated(d$abs.cors.),]
+
+
+head(d[order(-d$abs.cors.),])
+
+# si on prend les top 0.5% des correlations pairwises entre tfs : 
+q <- quantile(d$abs.cors., probs = 0)
+top <- d[d$abs.cors.> q,]
+top$tf1 <- str_split_fixed(top$names, " ", 2)[,1]
+top$tf2 <- str_split_fixed(top$names, " ", 2)[,2]
+
+
+load("D:/These/NetworkShiny/Data/OntologyAllGenes.RData")
+
+top$tf1_name <- ontologies[match(top$tf1, ontologies$ensembl_gene_id),"external_gene_name"]
+top$t21_name <- ontologies[match(top$tf2, ontologies$ensembl_gene_id),"external_gene_name"]
+
+
+getTargets <- function(tf){
+  targets <- data$edges[data$edges$from==tf,"to"]
+  names <- data$nodes[data$nodes$id %in% targets, "label"]
+  #return(paste(names, collapse = ', '))
+  return(names)
+}
+
+getCommonTargets <- function(pair){
+  tf1 <- str_split_fixed(pair, ' ', 2)[,1]
+  tf2 <- str_split_fixed(pair, ' ', 2)[,2]
+  
+  # print(getTargets(tf1))
+  # print(getTargets(tf2))
+  # 
+  print(intersect(getTargets(tf1), getTargets(tf2)))
+  
+  return(length(intersect(getTargets(tf1), getTargets(tf2))))
+}
+
+getTargetsNumber <- function(tf){
+  return(length(data$edges[data$edges$from==tf,"to"]))
+}
+
+top$tf1_target_Number <- sapply(top$tf1, getTargetsNumber)
+top$tf2_target_Number <- sapply(top$tf2, getTargetsNumber)
+
+#top$tf1_targets <- sapply(top$tf1, getTargets)
+#top$tf2_targets <- sapply(top$tf2, getTargets)
+
+
+tf1 = "AT3G25730"
+tf2 = "AT1G77450"
+
+
+top$CommonTargetsNumber <- sapply(top$names, getCommonTargets)
+
+#hist(cors, breaks = 30)
+#hist(corEdgesDouble, breaks = 30)
+
+plot(x = top$abs.cors., y = top$CommonTargetsNumber, main = "Nombre de cibles communes en fonction de la correlation pour toutes les paires de TFs")
+cor(top$abs.cors., top$CommonTargetsNumber, method = "spearman")
+
+save(top, file = "D:/These/NetworkInference/corrTFsCommonTargets.RData")

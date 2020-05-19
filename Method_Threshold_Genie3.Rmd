@@ -1,0 +1,260 @@
+---
+title: "Thresholding Method for GENIE3 network inference"
+author: "Oceane Cassan"
+date: \today
+output: 
+  rmdformats::readthedown:
+  fig_width: 12
+highlight: kate
+includes:
+  after_body: footer.html
+---
+  
+  
+  
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr, warn.conflicts = F, quietly = T)
+library(rmdformats, warn.conflicts = F, quietly = T)
+options(Encoding="UTF-8")
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.align = "center")
+opts_knit$set(width=75)
+
+
+setwd("D:/These/NetworkInference")
+
+suppressMessages(library(igraph, warn.conflicts = F, quietly = T))
+suppressMessages(library(visNetwork, warn.conflicts = F, quietly = T))
+suppressMessages(library(genefilter, warn.conflicts = F, quietly = T))
+suppressMessages(library(ggplot2, warn.conflicts = F, quietly = T))
+suppressMessages(library(GENIE3, warn.conflicts = F, quietly = T))
+suppressMessages(library(stringr, warn.conflicts = F, quietly = T))
+
+```
+
+# Contexte
+
+GENIE3 est une méthode d'inférence de Gene Regulatory Networks. Elle prend en entrée une liste de gènes cibles, une liste de TFs, et une matrice donnant les profils d'expression de tous ces gènes parmis différentes conditions.
+
+
+GENIE3 détermine par Random Forests, pour chaque profil d'expression d'un gène cible l'influence/importance de l'expression de chaque TF renseigné.
+Il en résulte une matrice d'adjascence non sparse, contenant une valeur d'importance pour toutes les paires TFs-cibles possibles.
+
+On cherche à déterminer une valeur d'importance seuil, au dessus de laquelle on garderait les interractions TFs-gènes cibles pour construire notre réseau.
+
+Certaines méthodes ont déja été envisagées ou essayées :
+  
++ **Hard thresholding** : pour l'instant, on a fixé un seuil assez arbitraire (seulement basé sur le nombre d'arrêtes qui rend le réseau visualisable et analisable). On a fixé un réseau qui contient les 3000 arrêtes de poids le plus fort.
+
++ **BRANE CUT** : a l'air très inétressante mais codée en Matlab et requiert des données générées en Matlab. J'aime peu l'idée d'utiliser matlab (elitiste, cher et pas dans les principes open source), et en plus si on veut mettre notre méthode à disposition, ça complique beaucoup les choses d'appeler du code matlab en dehors du R.
+
++ **Backboning** : Intéressant mais repose sur des hypothèses que nous ne sommes pas sûrs de vérifier dans notre cas particulier, notament la loi binomiale pour le poids d'une arrête. Module python.
+
+
+Nous avons donc décider de penser à une méthode que nous pourrions implémenter et tester par nous même, en R, pour répondre à nos attentes/contexte particulier.
+
+# Description de la méthode
+
+L'idée est de détacher les variables (TFs) influentes dans l'explication de l'expression des gènes cibles de l'aléatoire, du bruit de fond des données.
+Or, nous n'avons à priori pas d'idée de cette valeur qui nous permettrait de **trancher entre valeur d'importance informative, et valeur d'importance non informative**.
+
+L'idée est inspirée d'une méthode que Sophie avait déjà rencontrée sur des Random Forest. 
+
++ On crée des variables issues de l'**expression moyenne des TFs**, qui ne portent donc pas plus d'information que ce que les autres TFs peuvent apporter. 
+On appelle ces variables les variables random, ou espionnes. En pratqie, on les lire dans une loi de Poisson dont le paramètre est la moyenne de l'expression de tous les TFs. (Il s'agit d'un vecteur d'expressions, de dimension le nombre de conditions d'expression dans jeu de données)
+
++ On insére ces variables au jeu de données, puis on utilise GENIE3 sur ce jeu de données.
+
++ En sortie, nous regardons des valeurs d'importance pour chaque paire gène cible-variable random. La distribution des ces importances correspond à la distribution de notre **hypothèse nulle**, c'est à dire **la distribution des importances qu'on attend pour des TFs non informatifs**.
+
++ Pour chaque paire (vrai)TF-gène cible, on place l'importance associée sur la distribution précédente. Si l'importance est supérieure au quantile à 0.001 de cette distribution, un garde cette interaction TF-cible pour notre réseau. Re-Formulation de cette étape : une interaction est gardée si elle a moins de 1 millième de chances de se produire dans le cas ou le TF n'est pas informatif pour la cible.
+
++ On obtient une liste très réduite d'interactions que nous utilisons pour construire le réseau final.
+
+### Fonction R relative pour cette méthode : 
+
+```{r method}
+
+#' Inserts the random variables
+#'
+#' @param normalized.count expression data to which we wan't to add the spy variables
+#' @param regressors regulators to use to generate the spies
+#' @param n_spies number of random varaibles
+#' @param keepColMeans weather or not to use means specific to the conditions or a global mean
+#'
+#' @return the expression dataframe with spy variables inside
+#' @export
+insertSpyVariable <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 3, keepColMeans = T){
+  means <- colMeans(normalized.count[regressors,])
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  for(cond in colnames(normalized.count)){
+    if(keepColMeans) spies[,cond] <- rpois(lambda = means[cond], n = n_spies)
+    else spies[,cond] <- rpois(lambda = mean(means), n = n_spies)
+  }
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+#' Function to combine genie3 and our thresholding method
+#'
+#' @param normalized.count expression data
+#' @param regressors regulators (TFs) names in normalized.count
+#' @param targets target genes
+#' @param nTrees number of trees in GENIE3
+#' @param nCores number of cores in GENIE3
+#' @param pval quantile to use on the null distribution
+#' @param varNorm weather to normalize the expression data to have 
+#' a unit variance
+#' @param n_spies number of random variables
+#' @param keepColMeans weather or not to use means specific to the conditions or a global mean
+#' @param returnNlinks weather or not to return only the number of links, not the network
+#'
+#' @return the infered graph, or the number of links of the inferred graph
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=5000, nCores=5, 
+                  pval = 0.05, varNorm = F, n_spies = 5, keepColMeans = T, returnNlinks = F){
+  
+  normalized.count <- insertSpyVariable(normalized.count, regressors,
+                                        n_spies = n_spies, keepColMeans = keepColMeans)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+
+  if (varNorm) normalized.count <- normalized.count/rowSds(normalized.count)
+
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+                treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+  
+  thrs <- c(mat[grepl('spy_', rownames(mat)),])
+  threshold = quantile(thrs, probs = 1-pval)
+  print(threshold)
+
+  links <- getLinkList(mat, threshold = threshold)
+  links <- links[!grepl('spy_', links[,1]),]
+  if (returnNlinks) return(dim(links)[1]) 
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(list(net = g, impSpies = thrs, impTFs = thrs <- c(mat[!grepl('spy_', rownames(mat)),])))
+}
+```
+
+# Exécution de la méthode
+
+Nous exécutons cette méthode en inférant un réseau sur les gènes **DE entre cnF et CnF** (1309 gènes), et en utilisant les valeurs d'expression des gènes dans les conditions **cNF, cnF, CNF, CnF**. (3*4 colonnes dans la matrice d'expression). On prend une pvalue (quantile à 0.001), on ne normalize pas les profils d'expression à une variance unitaire, et on prend 10 variables espionnes tirées dans des lois de Poisson de moyenne la moyenne globale.
+
+```{r run}
+source("Funtions/Network_functions.R")
+
+load("./Data/DEGsListsFiltered.RData")
+load("./Data/PlnTFBDRegulatorsList.RData")
+load("./Data/normalized.count_At.RData")
+load("./Data/OntologyAllGenes.RData")
+
+
+pval = 0.001
+# DE genes
+genes <- DEGs[["cnF CnF"]]
+print(length(genes))
+
+# expression data
+normalized.count <- normalized.count[,grepl('F', colnames(normalized.count))]
+head(normalized.count)
+
+# TFs
+regressors = intersect(TF$AGI, genes)
+print(length(regressors))
+
+# inference and thresholding
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, varNorm = F, pval = pval, n_spies = 20, 
+              keepColMeans = F)
+net <- res$net
+length(V(net)) # nombre de genes du reseau
+length(E(net)) # nombre d'arretes
+
+```
+
+
+Les arrêtes que nous conservons correpondent donc à l'aire bleue à partir du seuil.
+
+## le réseau en sortie 
+
+
+```{r net}
+networkToData <- function(net, ontologies, TF){
+  data <- toVisNetworkData(net)
+  data$nodes$Ontology <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "external_gene_name"]
+  data$nodes$description <- ontologies[match(data$nodes$id, ontologies$ensembl_gene_id), "description"]
+  data$nodes$group <- ifelse(data$nodes$id %in% TF$AGI, "Regulator", "Target Gene")
+  
+  data$nodes$label <- data$nodes$Ontology
+  data$edges$color <- '#333366'
+  data$edges$value <- data$edges$weight
+  data$edges$Regulator_Name <-
+    ontologies[match(data$edges$from, ontologies$ensembl_gene_id), ]$external_gene_name
+  data$nodes$description <-
+    ifelse(
+      grepl("\\[", data$nodes$description),
+      str_split_fixed(data$nodes$description, "\\[", 2)[, 1],
+      data$nodes$description
+    )
+  data$edges$Target_Name <-
+    ontologies[match(data$edges$to, ontologies$ensembl_gene_id), ]$external_gene_name
+  return(data)
+}
+
+data <- networkToData(net, ontologies, TF)
+plotNetwork(data)
+```
+
+
+# Distribution des valeurs d'importance
+
+On s'attend à coir une distribution des TFs plus étalée vers de fortes importances que ne le serait celle des variables espionnes.
+
+C'est en effet ce que l'on constate :
+
+```{r dist}
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+
+p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+  geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                         linetype="dotted", size=1.5) 
+
+p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs")
+
+p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)")
+
+```
+
+# Exploration paramétrique
+
+<img src="D:\These\NetworkAnalysisSophie\explorationGENIE3.png" align="center" alt="" width="1500"/>
+
+
+<img src="D:\These\NetworkAnalysisSophie\explorationGENIE3zoom.png" align="center" alt="" width="1500"/>
+
+
+# Version seuil gene specific
+
+<img src="D:\These\NetworkAnalysisSophie\explorationGENIE3GeneSpecific.png" align="center" alt="" width="1500"/>
+
+# Effet de la variance normalisée
+
+A priori, on avait vu que la variance ne change pas trop les réseaux inférés, switch des arrêtes, mais on maimerait le quantifier.
+
+Correlation de spearman de sophie
