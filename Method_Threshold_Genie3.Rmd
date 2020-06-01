@@ -45,6 +45,11 @@ GENIE3 est une méthode d'inférence de Gene Regulatory Networks. Elle prend en 
 
 
 GENIE3 détermine par Random Forests, pour chaque profil d'expression d'un gène cible l'influence/importance de l'expression de chaque TF renseigné.
+
+
+For each input gene, considered as a **target gene**, a Random Forest is fitted. This random forest is composed of N regression trees, which objective is to predict the expression of the target gene using the regulators as regressors on the tree splits. Each tree can then provide an "importance" value for the regulators, based on the varaiance reduction caused by the regulators in the tree splits. A robust importance value can be computed by averaging the values of all the trees.
+
+
 " Several variable importance measures have been proposed in the literature for tree-based methods. In our experiment, we consider a measure which at each test node computes the total reduction of the variance of the output variable due to the split," (GENIE3 publication)
 
 Il en résulte une matrice d'adjascence non sparse, contenant une valeur d'importance pour toutes les paires TFs-cibles possibles.
@@ -59,8 +64,9 @@ Certaines méthodes ont déja été envisagées ou essayées :
 
 + **Backboning** : Intéressant mais repose sur des hypothèses que nous ne sommes pas sûrs de vérifier dans notre cas particulier, notament la loi binomiale pour le poids d'une arrête. Module python.
 
+Dans la litérature, certains fixent des seuils arbitraires, d'autres utilisent des données extrenes de validation pour fixer le nombre d'arrête maximisant la performance prédictive du réseau. Nous n'en avons pas dans notre cas.
 
-Nous avons donc décider de penser à une méthode que nous pourrions implémenter et tester par nous même, en R, pour répondre à nos attentes/contexte particulier.
+Nous avons donc décidé de penser à une méthode que nous pourrions implémenter et tester par nous même, en R, pour répondre à nos attentes/contexte particulier.
 
 # Description de la méthode
 
@@ -80,7 +86,7 @@ On appelle ces variables les variables random, ou espionnes. En pratique, on les
 
 + On obtient une liste très réduite d'interactions que nous utilisons pour construire le réseau final.
 
-### Fonction R relative pour cette méthode : 
+### Fonction R pour cette méthode : 
 
 ```{r method}
 
@@ -108,6 +114,24 @@ insertSpyVariable <- function(normalized.count, regressors = row.names(normalize
   return(normalized.count)
 }
 
+insertSpyVariableEmprical <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 12, keepColMeans = T){
+  
+  tfs_expressions <- as.vector(normalized.count[regressors,])
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(cond in colnames(normalized.count)){
+    spies[,cond] <- sample(tfs_expressions, size = n_spies)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
 #' Function to combine genie3 and our thresholding method
 #'
 #' @param normalized.count expression data
@@ -123,11 +147,23 @@ insertSpyVariable <- function(normalized.count, regressors = row.names(normalize
 #' @param returnNlinks weather or not to return only the number of links, not the network
 #'
 #' @return the infered graph, or the number of links of the inferred graph
-genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=5000, nCores=5, 
-                  pval = 0.05, varNorm = F, n_spies = 5, keepColMeans = T, returnNlinks = F){
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, 
+                  pval = 0.05, varNorm = F, n_spies = 5, keepColMeans = T, returnNlinks = F,
+                  new_spies = F){
   
-  normalized.count <- insertSpyVariable(normalized.count, regressors,
+  
+
+#   ____________________________________________________________________________
+#   network inference                                                       ####
+  if(new_spies){
+    normalized.count <- insertSpyVariableEmprical(normalized.count, regressors,
+                                        n_spies = n_spies)
+  }
+  else{
+    normalized.count <- insertSpyVariable(normalized.count, regressors,
                                         n_spies = n_spies, keepColMeans = keepColMeans)
+  }
+  
   
   regressors <- intersect(rownames(normalized.count),regressors)
   regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
@@ -136,6 +172,11 @@ genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=5000, nCo
 
   mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
                 treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+  
+  
+#   ____________________________________________________________________________
+#   thresholding                                                            ####
+
   
   thrs <- c(mat[grepl('spy_', rownames(mat)),])
   threshold = quantile(thrs, probs = 1-pval)
@@ -148,6 +189,20 @@ genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=5000, nCo
   g <- graph_from_data_frame(links, directed = T)
   return(list(net = g, impSpies = thrs, impTFs = thrs <- c(mat[!grepl('spy_', rownames(mat)),])))
 }
+
+# returns the pvalue for one importance value, by placing it on the
+# empirical null distribution
+getPvalue <- function(value, null_distribution){
+  return(sum(null_distribution > value)/length(null_distribution))
+}
+
+getCorrectedPvalues <- function(null_distribution, importances_to_test, method = 'fdr'){
+  pvalues <- sapply(importances_to_test, getPvalue, null_distribution = null_distribution)
+  fdr <- p.adjust(pvalues, method = method)
+  return(fdr)
+}
+
+
 ```
 
 # Exécution de la méthode
@@ -219,6 +274,37 @@ data <- networkToData(net, ontologies, TF)
 plotNetwork(data)
 ```
 
+# Visualisation de la correction des tests multiples
+
+Comme on teste un nombre très grand valeurs d'importances (176000 environ pour ce réseau), on choisit de corriger les pvalues avec la méthode du FDR (https://en.wikipedia.org/wiki/False_discovery_rate#Benjamini%E2%80%93Hochberg_procedure).
+
+On place toutes les valeurs d'importance sur la distribution de l'hypothèse nulle pour obtenir leurs pvalues.
+
+On utilise ensuite la fonction p.adjust sur ce vecteur de pvalues en spécifiant le type de correction.
+
+```{r fdr}
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+pvals <- sapply(tfs, getPvalue, null_distribution=spies)
+
+
+fdr <- getCorrectedPvalues(spies, tfs, method = "fdr")
+bonfer <- getCorrectedPvalues(spies, tfs, method = "bonferroni")
+
+summary(bonfer)
+d <- data.frame("p_values" = c(pvals, fdr), Correction = c(rep("none", length(pvals)), rep("fdr", length(fdr))))
+
+
+p <- ggplot(data = d, aes(x = p_values, fill = Correction)) +
+  geom_density(alpha = 0.3)
+
+p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non")
+
+```
+
+On constate que toutes les pvalues, après correction, sont shiftées, et on n'en a quasi plus de significatives si on prend des seuils classiques autour de 5, 10 ou 1%...
 
 # Distribution des valeurs d'importance
 
@@ -227,10 +313,11 @@ On s'attend à voir une distribution des TFs plus étalée vers de fortes import
 C'est en effet ce que l'on constate :
 
 ```{r dist}
-
 spies <- res$impSpies
 tfs <- res$impTFs
 
+print(head(tfs))
+print(head(spies))
 d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
 
 p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
@@ -244,6 +331,193 @@ p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/100
 ```
 
 On note que comparé au nombre total possible d'arrêtes (176 000), on en sélectionne très peu.
+
+# Variance des variables espionnes : sont-elles de "vraies" espionnes?
+
+Si les variables espionnes générées avec une loi de Poisson ne sont en fait pas aussi dispersées que les valeurs d'expression des vrais TFs, cela pourrait les différencier, et donc biaiser notre méthode. On affiche donc leur variance pour s'en rendre compte, comparé à celle des TFs :
+
+```{r var_espionnes}
+
+exp <- insertSpyVariable(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 135, keepColMeans = F)
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+spy_means <- rowMeans(exp[grepl('spy', rownames(exp)),])
+summary(spy_means)
+
+
+plot(spy_means, spy_vars)
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des sd pour les variables espionnes et les vrais TFs")
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des sd pour les variables espionnes et les vrais TFs") 
+
+summary(spy_vars)
+summary(tfs_vars)
+
+```
+
+
+En effet! les variaances sont beaucoup plus petites, notre méthode ne parvient donc pas à créer des variables ressemblantes aux vrais TFs d'un point de vue de leur dispersion. Cela peut ensuite favoriser leur utilisation ou non dans les random forests. 
+
+## Echantillonnage empirique des espionnes
+
+On choisit donc plutôt d'échantillonner les espionnes dans les valeurs d'epxression des TFs existants, pour avoir une distribution similaire (qui devrait ressembler plutôt à une négative binomiale) :
+
+
+```{r new_method}
+
+insertSpyVariableEmprical <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 12, keepColMeans = T){
+  
+  tfs_expressions <- as.vector(normalized.count[regressors,])
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(cond in colnames(normalized.count)){
+    spies[,cond] <- sample(tfs_expressions, size = n_spies)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+
+exp <- insertSpyVariableEmprical(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 30)
+
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+spy_means <- rowMeans(exp[grepl('spy', rownames(exp)),])
+summary(spy_means)
+
+
+plot(spy_means, spy_vars)
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecarts types pour les variables espionnes et les vrais TFs") 
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecart types pour les variables espionnes et les vrais TFs") 
+
+summary(spy_vars)
+summary(tfs_vars)
+
+```
+
+
+
+Dans ce cas là, on se retrouve avec des variances de profils beaucoup plus grandes que celles des TFs. Je pense que c'est dû au fait que les valeurs d'expression moyennes entre TFs sont très différentes les unes de autres. Du coup, quand on pioche des valeurs d'expression au hasard dans les expressions des TFs, on crée des espionnes qui n'ont pas un niveau d'expression "cohérent", car il peut prendre des valeurs très fortes ou très faibles. Il faudrait pouvoir limiter la variation de l'expression des espionnes comme l'est celle des TFs autour de leur niveau d'expression moyen... Qui est certes plus dispersé qu'une loi de Poisson, mais moins que ce que l'on obtient là. Dans ce cas là, il faudrait peut être vraiment utiliser une loi négative binomiale plutôt que de tirer les expressions de manière empirique parmis toutes les valeurs des TFs.
+
+## Centrage des expressions des TFs
+
+```{r center}
+
+n_spies = 130
+
+cent_reg <- normalized.count[regressors,] - rowMeans(normalized.count[regressors,])
+tfs_expressions <- as.vector(cent_reg)
+hist(tfs_expressions, breaks = 60)
+  
+spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                    row.names = paste0("spy_",seq(1:n_spies)))
+  
+for(cond in colnames(normalized.count)){
+  spies[,cond] <- sample(tfs_expressions, size = n_spies)
+}
+
+tfs_vars <- rowSds(cent_reg)
+
+spy_vars <- rowSds(spies)
+
+
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecarts types pour les variables espionnes et les vrais TFs") 
+
+p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecart types pour les variables espionnes et les vrais TFs") 
+
+
+tfs_vars <- rowMeans(cent_reg)
+
+spy_vars <- rowMeans(spies)
+
+
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des moyennes pour les variables espionnes et les vrais TFs") 
+
+```
+
+On se retrouve avec des variances assez proches, et qui pourraient peut être être satisfaisantes.
+Cependant, en echantillonnant des valeurs d'expression parmis toutes les expressions des TFs, on se retrouve avec des moyennes d'expressions qui valent toutes 0 pour les vrais TFs, et des moyennes non nulles pour les espionnes.
+
+
+Par curiosité, on relance genie3 pour voir la distribution de l'importance de ces nouvelles espionnes par rapport aux vrais Tfs :
+
+
+```{r run_empirical}
+
+
+# inference and thresholding
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, varNorm = F, pval = pval, n_spies = 20, 
+              keepColMeans = F, new_spies = T)
+net <- res$net
+length(V(net)) # nombre de genes du reseau
+length(E(net)) # nombre d'arretes
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+print(head(tfs))
+print(head(spies))
+
+d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+
+p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+  geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                         linetype="dotted", size=1.5) 
+
+p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs")
+
+p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)")
+
+```
+On voit que les deux distributions sont beaucoup plus proches, celle des TFs diffère uniquement un peu sur la upper tail de la distribution, avec des valeurs d'importance plus élevées.
+On retient avec cette méthode environ 3000 aretes.
+
+Dans tous les cas, on est embêté car ces variables espionnes n'ont toujours pas une variance comparable à celle des TFs, donc le test peut encore être biaisé. Il faut trouver un meilleur moyen de les générer.
 
 # Exploration paramétrique
 
@@ -268,12 +542,12 @@ Nous lançons donc la méthode plusieurs fois, pour chaque set de paramètres, e
 
 On se rend compte qu'on n'a pas vraiment d'effet de la normalisation (étudié plus bas).
 
-Ensuite, de prendre une moyenne non dépendant des conditions donne un plus grand nombre d'arrêtes, faisant penser qu'il s'agit d'un choix moins informatif pour nos variables randoms, et donc plus proche de notre hypthèse nulle.
+Ensuite, de prendre une moyenne non dépendant des conditions donne un plus grand nombre d'arrêtes, faisant penser qu'il s'agit d'un choix moins informatif pour nos variables randoms, et donc plus proche de notre hypothèse nulle.
 
 
 Il faut des quantiles assez faibles pour avoir un nombre d'arrêtes raisonnable, on peut dire qu'entre 0.005 et 0.001 on est dans une bonne zone.
 
-Le nombre de vraibles espionnes semble augmenter le nombre d'arrêtes sélectionnées, je ne sais pas encore exactement pourquoi.
+Le nombre de variables espionnes semble augmenter le nombre d'arrêtes sélectionnées, je ne sais pas encore exactement pourquoi, à continuer d'explorer.
 
 # Version seuil gene specific
 
@@ -329,12 +603,14 @@ Cela confirme que la normalisation de la variance ne semble pas nécessaire, car
 # CONCLUSION
 
 
-Au terme des simulations et des tests, il semblerait que nous puissions nous orienter vers cette méthode, en définissant un quantile assez petit, et en prenant  une moyenne globale comme paramètre des lois de Poisson de nos variables espionnes.
+Au terme des simulations et des tests, il semblerait que nous puissions nous orienter vers cette méthode.
 
 
-Le choix du nombre de variables espionnes est encore un peu flou, et relativement peu influent. Nous pouvons supposer qu'il est mieux de privilégier un petit nombre de variables espionnes afin de ne pas interférer avec les combinatoires de TFs inférées par GENIE3, et ne pas risquer de diminuner le ratio signal sur bruit. 
+Le choix du nombre de variables espionnes est encore un peu flou, et relativement peu influent. Nous pouvons supposer qu'il est mieux de privilégier un petit nombre de variables espionnes afin de ne pas interférer avec les combinatoires de TFs inférées par GENIE3, et ne pas risquer de diminuner le ratio signal sur bruit. On pourrait partir sur 10% du nombre de TFs dans le jeu de données.
 
-Un point négatif est qu'il reste encore pas mal de variabilité dans les réseaux finaux (en terme de nombre de connexions), car ils dépendent pas mal du tirage initial des variables randoms.
+Un point négatif est qu'il reste encore pas mal de variabilité dans les réseaux finaux (en terme de nombre de connexions), car ils dépendent pas mal du tirage initial des variables randoms. Si on lance plusieurs fois la méthode avec les mêmes paramètres, le nombre de connexions du réseau final peut varier de plusieurs centaines... souvent entre 800 et 1200 arrêtes pour les paramètres utilisés lors de l'exécution. On pourrait appliquer plusieurs fois la méthode et moyenner les seuils obtenus.
+
+**Il reste à finir de traiter la question de la correction des tests multiples, trop conservatrice à cause du très grand nombre de tests.**
 
 
 Il s'agit ici d'un **test empirique** que nous avons créé pour répondre à notre problème.
@@ -342,7 +618,7 @@ Au lieu de connaître théoriquement le distribution de l'importance du bruit de
 
 
 Les résultats restent sujets à des choix pas toujours triviaux en termes de valeurs de paramètres, mais la sortie de notre méthode est plus interprêtable et utilisable que du hard thresholding.
-En effet, plutôt que de fixer un seuil sur une valeur d'importance issue d'un random forest à priori peu informative, nous pouvons travailler avec des pvalues, traduisant plus correctement notre volonté de stringeance.
+En effet, plutôt que de fixer un seuil sur une valeur d'importance issue d'un random forest à priori peu parlante, nous pouvons travailler avec des pvalues, traduisant plus correctement notre volonté de stringeance.
 
 
 Cela semble être une bonne base pour commencer à analyser et interprêter le réseau en des termes plus biologiques! 

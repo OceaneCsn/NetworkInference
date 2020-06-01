@@ -1,0 +1,437 @@
+---
+title: "Thresholding Method for GENIE3 network inference"
+author: "Oceane Cassan"
+date: \today
+output: 
+  rmdformats::readthedown:
+  fig_width: 12
+highlight: kate
+includes:
+  after_body: footer.html
+---
+  
+  
+  
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr, warn.conflicts = F, quietly = T)
+library(rmdformats, warn.conflicts = F, quietly = T)
+options(Encoding="UTF-8")
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.align = "center")
+opts_knit$set(width=75)
+
+
+setwd("D:/These/NetworkInference")
+
+suppressMessages(library(igraph, warn.conflicts = F, quietly = T))
+suppressMessages(library(visNetwork, warn.conflicts = F, quietly = T))
+suppressMessages(library(genefilter, warn.conflicts = F, quietly = T))
+suppressMessages(library(ggplot2, warn.conflicts = F, quietly = T))
+suppressMessages(library(GENIE3, warn.conflicts = F, quietly = T))
+suppressMessages(library(stringr, warn.conflicts = F, quietly = T))
+
+```
+
+# Contexte
+
+On cherche quelle est la méthode de génération des variables espionnes qui est la mieux
+
+
+Nous exécutons cette méthode en inférant un réseau sur les gènes **DE entre cnF et CnF** (1309 gènes), et en utilisant les valeurs d'expression des gènes dans les conditions **cNF, cnF, CNF, CnF**. (3*4 colonnes dans la matrice d'expression). On prend une pvalue (quantile à 0.001), on ne normalize pas les profils d'expression à une variance unitaire, et on prend 10 variables espionnes tirées dans des lois de Poisson de moyenne la moyenne globale.
+
+```{r init}
+source("Funtions/Network_functions.R")
+
+load("./Data/DEGsListsFiltered.RData")
+load("./Data/PlnTFBDRegulatorsList.RData")
+load("./Data/normalized.count_At.RData")
+load("./Data/OntologyAllGenes.RData")
+
+
+pval = 0.001
+# DE genes
+genes <- DEGs[["cnF CnF"]]
+print(length(genes))
+
+# expression data
+normalized.count <- normalized.count[,grepl('F', colnames(normalized.count))]
+head(normalized.count)
+
+# TFs
+regressors = intersect(TF$AGI, genes)
+```
+
+
+
+# Loi de poisson
+
+Nous avons pensé avec Sophie que si les variables espionnes générées avec une loi de Poisson ne sont en fait pas aussi dispersées que les valeurs d'expressions des vrais TFs, cela pourrait les différencier, et donc biaiser notre méthode. On affiche donc leur variance pour s'en rendre compte, comparé à celle des autres TFs :
+  
+```{r poisson}
+
+
+#' Inserts the random variables
+#'
+#' @param normalized.count expression data to which we wan't to add the spy variables
+#' @param regressors regulators to use to generate the spies
+#' @param n_spies number of random varaibles
+#' @param keepColMeans weather or not to use means specific to the conditions or a global mean
+#'
+#' @return the expression dataframe with spy variables inside
+#' @export
+insertSpyVariable <- function(normalized.count, regressors = row.names(normalized.count), 
+                           n_spies = 3, keepColMeans = F){
+  means <- colMeans(normalized.count[regressors,])
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                     row.names = paste0("spy_",seq(1:n_spies)))
+    for(cond in colnames(normalized.count)){
+     if(keepColMeans) spies[,cond] <- rpois(lambda = means[cond], n = n_spies)
+     else spies[,cond] <- rpois(lambda = mean(means), n = n_spies)
+    }
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+exp <- insertSpyVariable(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 135, keepColMeans = F)
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+spy_means <- rowMeans(exp[grepl('spy', rownames(exp)),])
+summary(spy_means)
+
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des variances pour les variables espionnes et les vrais TFs") + ylim(c(0,50000))
+
+p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des variances pour les variables espionnes et les vrais TFs") + ylim(c(0,100000))
+
+
+```
+Importances de ces variables après genie3 : 
+
+```{r} 
+
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=5000, nCores=5, 
+                pval = 0.05, varNorm = F, n_spies = 15){
+  
+  normalized.count <- insertSpyVariable(normalized.count, regressors,
+                                       n_spies = n_spies)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+  
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+               treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+
+  
+  thrs <- c(mat[grepl('spy_', rownames(mat)),])
+  threshold = quantile(thrs, probs = 1-pval)
+  print(threshold)
+  
+  links <- getLinkList(mat, threshold = threshold)
+  links <- links[!grepl('spy_', links[,1]),]
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(list(net = g, impSpies = thrs, impTFs = c(mat[!grepl('spy_', rownames(mat)),])))
+}
+
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, varNorm = F, pval = pval, n_spies = 15)
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+print(head(tfs))
+print(head(spies))
+d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+
+p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+  geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                         linetype="dotted", size=1.5) 
+
+p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs")
+
+p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)")
+```
+
+
+# Echantillonnage empririque
+
+```{r new_method}
+
+insertSpyVariableEmprical <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 15){
+  
+  tfs_expressions <- as.vector(normalized.count[regressors,])
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(cond in colnames(normalized.count)){
+    spies[,cond] <- sample(tfs_expressions, size = n_spies)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+
+exp <- insertSpyVariableEmprical(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 30)
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+spy_means <- rowMeans(exp[grepl('spy', rownames(exp)),])
+summary(spy_means)
+
+
+plot(spy_means, spy_vars)
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecarts types pour les variables espionnes et les vrais TFs") 
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecart types pour les variables espionnes et les vrais TFs") 
+
+summary(spy_vars)
+summary(tfs_vars)
+
+
+```
+Importances de ces variables après genie3 : 
+
+
+```{r} 
+
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, 
+                pval = 0.05, n_spies = 15){
+  
+  normalized.count <- insertSpyVariableEmprical(normalized.count, regressors,
+                                       n_spies = n_spies)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+  
+  print(regressors)
+  print(head(targets))
+  
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+               treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+
+  
+  thrs <- c(mat[grepl('spy_', rownames(mat)),])
+  
+  
+  spies <- thrs
+  tfs <- c(mat[!grepl('spy_', rownames(mat)),])
+  
+  
+  d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+  
+  p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+    geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                           linetype="dotted", size=1.5) 
+  
+  print(p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs"))
+  
+  print(p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)"))
+  
+  threshold = quantile(thrs, probs = 1-pval)
+  print(threshold)
+  
+  links <- getLinkList(mat, threshold = threshold)
+  links <- links[!grepl('spy_', links[,1]),]
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(list(net = g, impSpies = thrs, impTFs = c(mat[!grepl('spy_', rownames(mat)),])))
+}
+
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, pval = pval, n_spies = 20)
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+```
+
+# Echantillonnage empirique centré
+
+```{r center}
+insertSpyVariableEmpricalCenter <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 15){
+  
+  cent_reg <- normalized.count[regressors,] - rowMeans(normalized.count[regressors,])
+  tfs_expressions <- as.vector(cent_reg)
+
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(cond in colnames(normalized.count)){
+    spies[,cond] <- sample(tfs_expressions, size = n_spies)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+n_spies = 130
+
+exp <- insertSpyVariableEmpricalCenter(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 130)
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecarts types pour les variables espionnes et les vrais TFs") 
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecart types pour les variables espionnes et les vrais TFs") 
+
+
+# tfs_vars <- rowMeans(cent_reg)
+# 
+# spy_vars <- rowMeans(spies)
+# 
+# 
+# d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+# 
+# p <- ggplot(data = d, aes(y = Variance, x = Variable, fill = Variable)) +
+#   geom_boxplot(alpha = 0.3) 
+# 
+# p + ggtitle("Distribution des moyennes pour les variables espionnes et les vrais TFs") 
+
+```
+Importances de ces variables après genie3 : 
+
+
+```{r} 
+
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, 
+                pval = 0.05, n_spies = 15){
+  
+  normalized.count <- insertSpyVariableEmpricalCenter(normalized.count, regressors,
+                                       n_spies = n_spies)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+  
+  
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+               treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+
+  
+  thrs <- c(mat[grepl('spy_', rownames(mat)),])
+  
+  
+  spies <- thrs
+  tfs <- c(mat[!grepl('spy_', rownames(mat)),])
+  
+  
+  d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+  
+  p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+    geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                           linetype="dotted", size=1.5) 
+  
+  print(p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs"))
+  
+  print(p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)"))
+  
+  threshold = quantile(thrs, probs = 1-pval)
+  print(threshold)
+  
+  links <- getLinkList(mat, threshold = threshold)
+  links <- links[!grepl('spy_', links[,1]),]
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(list(net = g, impSpies = thrs, impTFs = c(mat[!grepl('spy_', rownames(mat)),])))
+}
+
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, pval = pval, n_spies = 20)
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+
+summary(spies)
+summary(tfs)
+```
+
+
+# pvalues
+
+
+```{r} 
+# returns the pvalue for one importance value, by placing it on the
+# empirical null distribution
+getPvalue <- function(value, null_distribution){
+  return(sum(null_distribution > value)/length(null_distribution))
+}
+
+getCorrectedPvalues <- function(null_distribution, importances_to_test, method = 'fdr'){
+  pvalues <- sapply(importances_to_test, getPvalue, null_distribution = null_distribution)
+  fdr <- p.adjust(pvalues, method = method)
+  return(fdr)
+}
+
+pvals <- sapply(tfs, getPvalue, null_distribution=spies)
+summary(pvals)
+
+fdr <- getCorrectedPvalues(spies, tfs, method = "fdr")
+summary(fdr)
+
+d <- data.frame("p_values" = c(pvals, fdr), Correction = c(rep("none", length(pvals)), rep("fdr", length(fdr))))
+
+
+p <- ggplot(data = d, aes(x = p_values, fill = Correction)) +
+  geom_density(alpha = 0.3)
+
+p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non")
+
+
+
+sum(fdr > quantile(fdr, probs = 1 - 0.01))
+
+```
+
+
+
