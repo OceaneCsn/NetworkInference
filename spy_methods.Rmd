@@ -170,6 +170,38 @@ p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
 p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs")
 
 p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)")
+
+
+# returns the pvalue for one importance value, by placing it on the
+# empirical null distribution
+getPvalue <- function(value, null_distribution){
+  return(sum(null_distribution > value)/length(null_distribution))
+}
+
+getCorrectedPvalues <- function(null_distribution, importances_to_test, method = 'fdr'){
+  pvalues <- sapply(importances_to_test, getPvalue, null_distribution = null_distribution)
+  fdr <- p.adjust(pvalues, method = method)
+  return(fdr)
+}
+
+pvals <- sapply(tfs, getPvalue, null_distribution=spies)
+summary(pvals)
+
+fdr <- getCorrectedPvalues(spies, tfs, method = "fdr")
+summary(fdr)
+
+d <- data.frame("p_values" = c(pvals, fdr), Correction = c(rep("none", length(pvals)), rep("fdr", length(fdr))))
+
+
+p <- ggplot(data = d, aes(x = p_values, fill = Correction)) +
+  geom_density(alpha = 0.3)
+
+p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non")
+
+
+
+sum(fdr > quantile(fdr, probs = 1 - 0.01))
+
 ```
 
 
@@ -396,6 +428,127 @@ summary(spies)
 summary(tfs)
 ```
 
+# Echantillonnage par shuffling des TFs
+
+```{r shuffle}
+
+insertSpyVariableShuffle <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 15){
+  
+  TFs <- sample(regressors, size = n_spies, replace = FALSE)
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(spy in seq(1:n_spies)){
+    spies[spy,] <- sample(normalized.count[sample(regressors, size = 1),], size = dim(normalized.count)[2],
+                          replace = FALSE)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+
+n_spies = 13
+
+exp <- insertSpyVariableShuffle(normalized.count, regressors= intersect(TF$AGI, genes), n_spies = 13)
+exp <- exp[rownames(exp)%in%intersect(TF$AGI, genes) | grepl("spy_", rownames(exp)),]
+
+vars <- rowSds(exp)**2
+tfs_vars <- vars[names(vars) %in% intersect(TF$AGI, genes)]
+spy_vars <- vars[!names(vars) %in% intersect(TF$AGI, genes)]
+
+
+d <- data.frame("Variance" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_violin(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecarts types pour les variables espionnes et les vrais TFs") 
+
+p <- ggplot(data = d, aes(y = sqrt(Variance), x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3) 
+
+p + ggtitle("Distribution des ecart types pour les variables espionnes et les vrais TFs") 
+
+
+tfs_vars <- rowMeans(exp)
+
+spy_vars <- rowMeans(exp)
+
+
+d <- data.frame("Mean" = c(tfs_vars, spy_vars), Variable = c(rep("TF", length(tfs_vars)), rep("Spy", length(spy_vars))))
+
+p <- ggplot(data = d, aes(y = Mean, x = Variable, fill = Variable)) +
+  geom_boxplot(alpha = 0.3)
+
+p + ggtitle("Distribution des moyennes pour les variables espionnes et les vrais TFs")
+
+```
+Importances de ces variables après genie3 : 
+
+
+```{r} 
+
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, 
+                pval = 0.05, n_spies = 15){
+  
+  normalized.count <- insertSpyVariableShuffle(normalized.count, regressors,
+                                       n_spies = n_spies)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+  
+  
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+               treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+
+  
+  thrs <- c(mat[grepl('spy_', rownames(mat)),])
+  
+  
+  spies <- thrs
+  tfs <- c(mat[!grepl('spy_', rownames(mat)),])
+  
+  
+  d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+  
+  p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+    geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+                                           linetype="dotted", size=1.5) 
+  
+  print(p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs"))
+  
+  print(p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)"))
+  
+  threshold = quantile(thrs, probs = 1-pval)
+  print(threshold)
+  
+  links <- getLinkList(mat, threshold = threshold)
+  links <- links[!grepl('spy_', links[,1]),]
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(list(net = g, impSpies = thrs, impTFs = c(mat[!grepl('spy_', rownames(mat)),])))
+}
+
+res <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, pval = pval, n_spies = 20)
+
+spies <- res$impSpies
+tfs <- res$impTFs
+
+
+summary(spies)
+summary(tfs)
+```
+
+Cela semble... fort pareil que précédement...
+
+C'est bien, et même plus simple! concluant :)
+
 
 # pvalues
 
@@ -429,7 +582,7 @@ p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non")
 
 
 
-sum(fdr > quantile(fdr, probs = 1 - 0.01))
+sum(fdr <  0.01)
 
 ```
 

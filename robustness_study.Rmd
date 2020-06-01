@@ -1,0 +1,200 @@
+---
+title: "Thresholding Method for GENIE3 network inference : robustness study"
+author: "Oceane Cassan"
+date: \today
+output: 
+  rmdformats::readthedown:
+  fig_width: 12
+highlight: kate
+includes:
+  after_body: footer.html
+---
+  
+  
+  
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr, warn.conflicts = F, quietly = T)
+library(rmdformats, warn.conflicts = F, quietly = T)
+options(Encoding="UTF-8")
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.align = "center")
+opts_knit$set(width=75)
+
+
+setwd("D:/These/NetworkInference")
+
+suppressMessages(library(igraph, warn.conflicts = F, quietly = T))
+suppressMessages(library(visNetwork, warn.conflicts = F, quietly = T))
+suppressMessages(library(genefilter, warn.conflicts = F, quietly = T))
+suppressMessages(library(ggplot2, warn.conflicts = F, quietly = T))
+suppressMessages(library(GENIE3, warn.conflicts = F, quietly = T))
+suppressMessages(library(stringr, warn.conflicts = F, quietly = T))
+
+```
+
+# Contexte
+
+On cherche à avoir si notre méthode de seuillage est robuste, on va le faire plein de fois et voir comment se recoupent les résultats.
+
+
+Nous exécutons cette méthode en inférant un réseau sur les gènes **DE entre cnF et CnF** (1309 gènes), et en utilisant les valeurs d'expression des gènes dans les conditions **cNF, cnF, CNF, CnF**. (3*4 colonnes dans la matrice d'expression). On prend une pvalue (quantile à 0.001), on ne normalize pas les profils d'expression à une variance unitaire, et on prend 10 variables espionnes tirées dans des lois de Poisson de moyenne la moyenne globale.
+
+```{r init}
+source("Funtions/Network_functions.R")
+
+load("./Data/DEGsListsFiltered.RData")
+load("./Data/PlnTFBDRegulatorsList.RData")
+load("./Data/normalized.count_At.RData")
+load("./Data/OntologyAllGenes.RData")
+
+
+pval = 0.001
+# DE genes
+genes <- DEGs[["cnF CnF"]]
+print(length(genes))
+
+# expression data
+normalized.count <- normalized.count[,grepl('F', colnames(normalized.count))]
+head(normalized.count)
+
+# TFs
+regressors = intersect(TF$AGI, genes)
+```
+
+# Echantillonnage par shuffling des TFs
+
+Les fonctions utilisées :
+
+```{r shuffle}
+
+insertSpyVariableShuffle <- function(normalized.count, regressors = row.names(normalized.count), 
+                              n_spies = 15){
+  
+  TFs <- sample(regressors, size = n_spies, replace = FALSE)
+  
+  spies <- data.frame(normalized.count[sample(rownames(normalized.count), size=n_spies),], 
+                      row.names = paste0("spy_",seq(1:n_spies)))
+  
+  for(spy in seq(1:n_spies)){
+    spies[spy,] <- sample(normalized.count[sample(regressors, size = 1),], size = dim(normalized.count)[2],
+                          replace = FALSE)
+  }
+  
+  
+  normalized.count <- rbind.data.frame(normalized.count, spies)
+  print(tail(normalized.count))
+  return(normalized.count)
+}
+
+getPvalue <- function(value, null_distribution){
+  return(sum(null_distribution > value)/length(null_distribution))
+}
+
+getCorrectedPvalues <- function(null_distribution, importances_to_test, method = 'fdr'){
+  pvalues <- sapply(importances_to_test, getPvalue, null_distribution = null_distribution)
+  fdr <- p.adjust(pvalues, method = method)
+  return(fdr)
+}
+
+
+genie3 <- function(normalized.count, regressors=NA, targets=NA, nTrees=1000, nCores=5, 
+                fdr = 0.01, n_spies = 15){
+  
+  normalized.count <- insertSpyVariableShuffle(normalized.count, regressors,
+                                       n_spies = n_spies)
+  
+  regressors <- intersect(rownames(normalized.count),regressors)
+  regressors = c(regressors, rownames(normalized.count)[grepl('spy_', rownames(normalized.count))])
+  
+  
+  mat <- GENIE3(as.matrix(normalized.count), regulators = regressors, targets = targets, 
+               treeMethod = "RF", K = "sqrt", nTrees = nTrees, nCores = nCores, verbose = T)
+
+  
+  spies <- c(mat[grepl('spy_', rownames(mat)),])
+  tfs <- c(mat[!grepl('spy_', rownames(mat)),])
+  
+  # pvals <- sapply(tfs, getPvalue, null_distribution=spies)
+  # fdr_ <- getCorrectedPvalues(spies, tfs, method = "fdr")
+  # 
+  # 
+  
+  # d <- data.frame("Importance" = c(tfs, spies), Variable = c(rep("TF", length(tfs)), rep("Spy", length(spies))))
+  # p <- ggplot(data = d, aes(x = Importance, fill = Variable)) +
+  #   geom_density(alpha = 0.3) + geom_vline(xintercept = quantile(spies, probs = 1 - pval),
+  #                                          linetype="dotted", size=1.5) 
+  # 
+  # print(p + ggtitle("Distribution des importances pour les variables espionnes et les vrais TFs"))
+  # print(p + ylim(c(0,5)) + ggtitle("Zoom sur la partie avec le seuil (quantile à  1/1000)"))
+  # 
+  # d <- data.frame("p_values" = c(pvals, fdr_), Correction = c(rep("none", length(pvals)), rep("fdr", length(fdr_))))
+  # p <- ggplot(data = d, aes(x = p_values, fill = Correction)) +
+  #   geom_density(alpha = 0.3)+ geom_vline(xintercept = fdr,
+  #                                          linetype="dotted", size=1.5)
+  # print(p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non"))
+
+  
+  links <- getLinkList(mat)
+  links <- links[!grepl('spy_', links[,1]),]
+  links$fdr <- getCorrectedPvalues(null_distribution = spies, 
+                                   importances_to_test = links$weight,
+                                   method = "fdr")
+  
+
+  d <- data.frame("p_values" = links$fdr)
+  
+  p <- ggplot(data = d, aes(x = p_values)) +
+    geom_density(alpha = 0.3)
+  print(p + ggtitle("Distribution des p values, avec correction BH (fdr) ou non"))
+  
+ 
+  print(fdr)
+  print(sum(links$fdr < fdr))
+  
+  links <- links[links$fdr < fdr,]
+
+
+  print(paste0("Number of links : ", dim(links)[1]))
+  g <- graph_from_data_frame(links, directed = T)
+  return(g)
+}
+
+
+```
+
+# Iterations de la méthode
+
+
+```{r} 
+res <- list()
+for(i in seq(1:30)){
+  res[[i]] <- genie3(normalized.count, regressors = regressors, 
+              targets = genes, fdr = 0.1, n_spies = 20)
+}
+save(res, file = "D:/These/NetworkInference/networks_from_fdrs.RData")
+```
+# Resultats
+
+```{r} 
+
+mat <- matrix(nrow = length(res), ncol = length(res))
+
+#length(E(intersection(res[[6]], res[[3]])))
+
+load("D:/These/NetworkInference/networks_from_fdrs.RData")
+for(i in seq(1:length(res))){
+  for(j in seq(1:length(res))){
+     mat[i,j] = length(E(intersection(res[[i]], res[[j]])))
+  
+  }
+}
+
+heatmap(mat)
+```
