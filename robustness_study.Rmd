@@ -55,8 +55,6 @@ load("./Data/normalized.count_At.RData")
 load("./Data/OntologyAllGenes.RData")
 
 
-pval = 0.001
-# DE genes
 genes <- DEGs[["cnF CnF"]]
 print(length(genes))
 

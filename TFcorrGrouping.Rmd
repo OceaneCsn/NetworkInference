@@ -1,0 +1,223 @@
+---
+title: "Analyse des TF très corrélés avant inférence"
+author: "Oceane"
+date: \today
+output: 
+  rmdformats::readthedown:
+  fig_width: 12
+highlight: kate
+includes:
+  after_body: footer.html
+---
+  
+  
+  
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr, warn.conflicts = F, quietly = T)
+library(rmdformats, warn.conflicts = F, quietly = T)
+options(Encoding="UTF-8")
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.align = "center")
+opts_knit$set(width=75)
+
+
+setwd("D:/These/NetworkInference/")
+
+suppressMessages(library(ggplot2, warn.conflicts = F, quietly = T))
+suppressMessages(library(stringr, warn.conflicts = F, quietly = T))
+suppressMessages(library(reshape2, warn.conflicts = F, quietly = T))
+suppressMessages(library(DIANE, warn.conflicts = F, quietly = T))
+suppressMessages(library(igraph, warn.conflicts = F, quietly = T))
+suppressMessages(library(visNetwork, warn.conflicts = F, quietly = T))
+suppressMessages(library(genefilter, warn.conflicts = F, quietly = T))
+suppressMessages(library(ggplot2, warn.conflicts = F, quietly = T))
+suppressMessages(library(GENIE3, warn.conflicts = F, quietly = T))
+
+```
+
+
+# Contexte
+
+
+# Fonction de regroupement
+
+
+```{r shuffle}
+
+get_cor <- function(pair, normalized.count){
+  tf1 <- str_split_fixed(pair, ' ',2)[1]
+  tf2 <- str_split_fixed(pair, ' ',2)[2]
+  return(cor(normalized.count[tf1,], normalized.count[tf2,], method = "spearman"))
+}
+
+
+group_correlated_TFs <- function(normalized.count, regressors, corr_thr = 0.9, plot = FALSE){
+  
+  #calculating correlations for each TF pairs
+  pairs <- data.frame(t(combn(regressors, 2)))
+  pairs$cor <- sapply(paste(pairs[,1], pairs[,2]), get_cor, normalized.count = normalized.count)
+  top <- pairs[pairs$cor > corr_thr,]
+  
+  
+  # graph and communities detection of highly correlated TFs
+  net_un <- graph_from_data_frame(top, directed = FALSE)
+  louvain <- cluster_louvain(net_un)
+  groups <- membership(louvain)
+  
+  other_tfs <- regressors[!regressors %in% names(groups)]
+  
+  # Builiding the new consensus variables
+  new_reg <- c()
+  grouped_regs <- data.frame(matrix(nrow = length(unique(groups)), ncol = length(colnames(normalized.count))))
+  colnames(grouped_regs) <- colnames(normalized.count)
+  rownames(grouped_regs) <- unique(groups)
+  
+  grouped_tfs <- c()
+  
+  for(group in unique(groups)){
+    tfs <- names(groups)[groups==group]
+    mean_tf <- colMeans(normalized.count[tfs,])
+    grouped_regs[group,] <- mean_tf
+    
+    
+    
+    # find the negatively correlated regulators to that group, and add them, without
+    # using their expression un the mean group expression
+    
+    for (tf in other_tfs){
+      if(cor(normalized.count[tf,], mean_tf, method = "spearman") < - corr_thr){
+        print(paste("adding tf ", tf, " to group ", group, "because correlation of", 
+                    cor(normalized.count[tf,], mean_tf, method = "spearman"), "to mean"))
+        tfs <- c(tfs, tf)
+        # remove this tf from the list so it is not assigned to another group later
+        other_tfs <- other_tfs[other_tfs != tf]
+        print(length(other_tfs))
+      }
+    }
+    
+    new_reg <- c(new_reg, paste0("mean_",paste(tfs, collapse = "-")))
+    grouped_tfs <- c(grouped_tfs, tfs)
+  }
+  rownames(grouped_regs) <- new_reg
+  normalized.count <- rbind.data.frame(normalized.count, grouped_regs)
+  
+  #remove regressors that are grouped from the data
+  normalized.count <- normalized.count[!rownames(normalized.count) %in% grouped_tfs,]
+  return(list(counts = normalized.count, membership = groups,
+              new_regressors = c(new_reg, regressors[!regressors %in% grouped_tfs])))
+}
+
+
+
+source("Funtions/Network_functions.R")
+
+load("./Data/DEGsListsFiltered.RData")
+load("./Data/PlnTFBDRegulatorsList.RData")
+load("./Data/normalized.count_At.RData")
+load("./Data/OntologyAllGenes.RData")
+
+
+genes <- DEGs[["cnF CnF"]]
+print(length(genes))
+
+# expression data
+normalized.count <- normalized.count[,grepl('F', colnames(normalized.count))]
+
+# TFs
+regressors = intersect(TF$AGI, genes)
+
+data <- group_correlated_TFs(normalized.count, regressors)
+print(data$new_regressors)
+groups <- data$new_regressors[grepl("mean", data$new_regressors)]
+membership <- data$membership
+```
+
+# Profils d'expression des communautés corrélées positivement
+
+```{r profiles, fig.width=10, fig.height=7}
+
+library(DIANE)
+for(group in unique(membership)){
+  print(draw_profiles(data = normalized.count, membership = membership, k = group,
+                conds = str_split_fixed(colnames(normalized.count), '_', 2)))
+  
+  print(draw_profiles(data = normalized.count, membership = membership, k = group, expression = "counts",
+              conds = str_split_fixed(colnames(normalized.count), '_', 2)))
+}
+
+```
+
+
+# Valeurs d'importance en retirant tous les TFs d'un groupe
+
+
+On infère GENIE3 sur les données classiques, sans espionnes ni variables résumées.
+On s'tintéresse au groupe 13, par exemple.
+
+On crée un graphe avec les 3000 premières arêtes, et on regarde pour le tf1, ses cibles, ainsi que l'union des cibles de tous les autres. On crée aussi une catégorie qui est celle des cibles communes entre le tf1 et les autres.
+
+```{r imp, fig.width=10, fig.height=7}
+
+load("./Data/normalized.count_At.RData")
+
+# expression data
+normalized.count <- normalized.count[,grepl('F', colnames(normalized.count))]
+mat <- GENIE3(normalized.count, regulators = regressors, targets = genes, nCores = 5)
+
+# au passage verification que la somme des importances pour un gene fait 1
+colSums(mat)
+
+links <- getLinkList(mat, reportMax = 3000)
+
+net <- graph_from_data_frame(links, directed = TRUE)
+
+
+see_importances <- function(group){
+  tfs <- names(membership[membership==group])
+  print(tfs)
+  print(draw_profiles(data = normalized.count, membership = membership, k = group, expression = "counts",
+                conds = str_split_fixed(colnames(normalized.count), '_', 2)))
+  
+  tf <- tfs[1]
+  others <- tfs[tfs!=tf]
+  
+  
+  tf_targets <- as.vector(neighbors(net, tf, mode = 'out')$name)
+  
+  others_targets <- c()
+  for(t in others){
+    others_targets <- c(others_targets, neighbors(net, t, mode = 'out')$name )
+  }
+  others_targets <- unique(others_targets)
+  print(length(others_targets))
+  common <- intersect (tf_targets, others_targets)
+  print(length(common))
+  
+  targets <- unique(c(tf_targets, others_targets))
+  data <- data.frame(cibles = targets, type = ifelse( targets %in% tf_targets, ifelse(targets %in% common, "common", "tf1"), "others"))
+  data$importance_all_community <- mat[tf, match(data$cibles, colnames(mat))]
+  
+  print(ggplot(data, aes(x = type, y = importance_all_community, fill= type)) + geom_violin(alpha = 0.7) + geom_jitter() + ggtitle("Importance de tf1 pour les cibles de tf1 ou des autres TFs de sa communauté"))
+  
+  
+  mat_tf1_alone <- GENIE3(normalized.count, regulators = regressors[!regressors %in% others], targets = genes, nCores = 5)
+  data$importance_tf1_alone <- mat_tf1_alone[tf, match(data$cibles, colnames(mat_tf1_alone))]
+  
+  
+  print(ggplot(data, aes(x = type, y = importance_tf1_alone, fill= type)) + geom_violin(alpha = 0.7) + geom_jitter() + ggtitle("Importance de tf1 pour les cibles de tf1 ou des autres TFs de sa communauté, sans les autres TFs de sa communauté"))
+}
+
+for(group in unique(membership)){
+  see_importances(group)
+}
+
+```
+
+On peut imaginer que dans un nouveau graphge, tf1 volerait les cibles correpondant à la pointe de la partie verte, dépassant le seuil.
